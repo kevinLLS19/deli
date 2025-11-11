@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Gestor de Entregas Inteligente</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: "Poppins", sans-serif;
+    }
+
+    header {
+      background: #4285F4;
+      color: white;
+      text-align: center;
+      padding: 15px;
+      font-size: 22px;
+      font-weight: bold;
+    }
+
+    #sidebar {
+      background: white;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-bottom: 2px solid #ddd;
+    }
+
+    button {
+      padding: 12px;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      color: white;
+      font-weight: 600;
+    }
+
+    #add-location { background: #34A853; }
+    #add-link { background: #5C6BC0; }
+    #start-route { background: #F4B400; }
+    #stop-route { background: #EA4335; }
+
+    #map { flex: 1; width: 100%; height: calc(100vh - 200px); }
+
+    ul { list-style: none; padding: 0; margin: 0; }
+    li {
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      background: #fafafa;
+      border-radius: 6px;
+      cursor: grab;
+    }
+
+    .telefono-link {
+      color: #34A853;
+      text-decoration: none;
+    }
+    .btns {
+      display: flex;
+      gap: 5px;
+    }
+    .delete-btn, .edit-btn {
+      color: white;
+      border: none;
+      border-radius: 5px;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    .delete-btn { background: #EA4335; }
+    .edit-btn { background: #5C6BC0; }
+  </style>
+</head>
+<body>
+  <header>🚚 Gestor de Entregas Inteligente</header>
+
+  <div id="sidebar">
+    <button id="add-location">🗺️ Agregar desde mapa</button>
+    <button id="add-link">📍 Agregar por enlace</button>
+    <button id="start-route">▶️ Comenzar ruta</button>
+    <button id="stop-route">⏹️ Detener ruta</button>
+    <ul id="location-list"></ul>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    let map, userMarker, userPos = null;
+    let addingMode = false;
+    let markers = [];
+    let directionsService;
+    let directionsRenderers = [];
+    let watchId = null;
+    let followUser = true;
+    const RADIO_LLEGADA = 0.05; // km → 50m
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: -12.0464, lng: -77.0428 },
+        zoom: 13,
+        heading: 0,
+        tilt: 0,
+      });
+
+      directionsService = new google.maps.DirectionsService();
+
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition((pos) => {
+          userPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          userMarker = new google.maps.Marker({
+            position: userPos,
+            map,
+            title: "Tu ubicación",
+            icon: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+          });
+          map.setCenter(userPos);
+        });
+      }
+
+      document.getElementById("add-location").addEventListener("click", toggleAgregar);
+      document.getElementById("add-link").addEventListener("click", agregarPorLink);
+      document.getElementById("start-route").addEventListener("click", comenzarRuta);
+      document.getElementById("stop-route").addEventListener("click", detenerRuta);
+
+      map.addListener("click", (e) => {
+        if (!addingMode) return;
+        abrirFormularioEntrega(e.latLng);
+      });
+
+      // Habilitar arrastrar y soltar en la lista
+      const lista = document.getElementById("location-list");
+      lista.addEventListener("dragstart", dragStart);
+      lista.addEventListener("dragover", dragOver);
+      lista.addEventListener("drop", drop);
+    }
+
+    function agregarPorLink() {
+      Swal.fire({
+        title: "Agregar por enlace de Google Maps",
+        input: "text",
+        inputLabel: "Pega el enlace (de maps.app.goo.gl o maps.google.com)",
+        showCancelButton: true,
+        confirmButtonText: "Buscar",
+      }).then(async (res) => {
+        if (!res.isConfirmed || !res.value) return;
+        const link = res.value;
+        const match = link.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+        if (match) {
+          const lat = parseFloat(match[1]);
+          const lng = parseFloat(match[2]);
+          abrirFormularioEntrega({ lat, lng });
+        } else {
+          Swal.fire("Error", "No se pudo leer la ubicación del enlace.", "error");
+        }
+      });
+    }
+
+    function abrirFormularioEntrega(latLng, data = null, index = null) {
+      Swal.fire({
+        title: data ? "Editar entrega" : "Nueva entrega",
+        html: `
+          <input type="text" id="nombre" class="swal2-input" placeholder="Nombre del cliente" value="${data ? data.nombre : ""}">
+          <input type="tel" id="telefono" class="swal2-input" placeholder="Número de celular" value="${data ? data.telefono : ""}">
+        `,
+        showCancelButton: true,
+        confirmButtonText: data ? "Guardar cambios" : "Guardar entrega",
+        preConfirm: () => {
+          const nombre = document.getElementById("nombre").value.trim();
+          const telefono = document.getElementById("telefono").value.trim();
+          if (!nombre || !telefono) {
+            Swal.showValidationMessage("Por favor, completa ambos campos");
+            return false;
+          }
+          return { nombre, telefono };
+        }
+      }).then((res) => {
+        if (res.isConfirmed) {
+          if (data && index !== null) {
+            markers[index].nombre = res.value.nombre;
+            markers[index].telefono = res.value.telefono;
+          } else {
+            const marker = new google.maps.Marker({
+              position: latLng,
+              map,
+              title: res.value.nombre,
+            });
+            markers.push({
+              nombre: res.value.nombre,
+              telefono: res.value.telefono,
+              marker,
+            });
+          }
+          actualizarLista();
+          recalcularRuta();
+        }
+      });
+    }
+
+    function toggleAgregar() {
+      addingMode = !addingMode;
+      Swal.fire("Modo agregar", addingMode ? "Toca el mapa para agregar una entrega" : "Modo agregar desactivado", "info");
+    }
+
+    function actualizarLista() {
+      const lista = document.getElementById("location-list");
+      lista.innerHTML = "";
+      markers.forEach((m, i) => {
+        const li = document.createElement("li");
+        li.setAttribute("draggable", "true");
+        li.dataset.index = i;
+        li.innerHTML = `
+          <div>
+            <b>${i + 1}. ${m.nombre}</b><br>
+            📞 <a href="tel:${m.telefono}" class="telefono-link">${m.telefono}</a>
+          </div>
+          <div class="btns">
+            <button class="edit-btn">✏️</button>
+            <button class="delete-btn">🗑️</button>
+          </div>
+        `;
+        li.querySelector(".delete-btn").addEventListener("click", () => {
+          m.marker.setMap(null);
+          markers.splice(i, 1);
+          actualizarLista();
+          recalcularRuta();
+        });
+        li.querySelector(".edit-btn").addEventListener("click", () => abrirFormularioEntrega(m.marker.getPosition(), m, i));
+        lista.appendChild(li);
+      });
+    }
+
+    // Arrastrar y soltar
+    let draggedIndex = null;
+    function dragStart(e) {
+      draggedIndex = e.target.dataset.index;
+    }
+    function dragOver(e) { e.preventDefault(); }
+    function drop(e) {
+      e.preventDefault();
+      const targetIndex = e.target.closest("li")?.dataset.index;
+      if (targetIndex === undefined) return;
+      const item = markers.splice(draggedIndex, 1)[0];
+      markers.splice(targetIndex, 0, item);
+      actualizarLista();
+      recalcularRuta();
+    }
+
+    function limpiarRutas() {
+      directionsRenderers.forEach(r => r.setMap(null));
+      directionsRenderers = [];
+    }
+
+    function recalcularRuta() {
+      if (!userPos || markers.length === 0) {
+        limpiarRutas();
+        return;
+      }
+
+      limpiarRutas();
+      for (let i = 0; i < markers.length; i++) {
+        const origen = i === 0 ? userPos : markers[i - 1].marker.getPosition();
+        const destino = markers[i].marker.getPosition();
+
+        const renderer = new google.maps.DirectionsRenderer({
+          map,
+          suppressMarkers: true,
+          polylineOptions: { strokeColor: "#4285F4", strokeWeight: 5 }
+        });
+
+        directionsService.route({
+          origin: origen,
+          destination: destino,
+          travelMode: google.maps.TravelMode.DRIVING,
+        }, (res, status) => {
+          if (status === "OK") renderer.setDirections(res);
+        });
+
+        directionsRenderers.push(renderer);
+      }
+    }
+
+    function comenzarRuta() {
+      if (!userPos || markers.length === 0) {
+        Swal.fire("Atención", "Necesitas ubicación y entregas.", "warning");
+        return;
+      }
+
+      Swal.fire("Ruta iniciada", "El mapa seguirá tu ubicación automáticamente.", "success");
+
+      watchId = navigator.geolocation.watchPosition((pos) => {
+        const oldPos = userPos;
+        userPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        userMarker.setPosition(userPos);
+        if (followUser) map.setCenter(userPos);
+
+        if (oldPos) {
+          const dx = userPos.lng - oldPos.lng;
+          const dy = userPos.lat - oldPos.lat;
+          const heading = Math.atan2(dx, dy) * (180 / Math.PI);
+          map.setHeading(heading);
+        }
+
+        detectarLlegada();
+      });
+    }
+
+    function detenerRuta() {
+      if (watchId) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        Swal.fire("Ruta detenida", "Has detenido el seguimiento GPS.", "info");
+      }
+    }
+
+    function detectarLlegada() {
+      if (markers.length === 0) return;
+
+      const destinoActual = markers[0];
+      const distancia = google.maps.geometry.spherical.computeDistanceBetween(
+        new google.maps.LatLng(userPos.lat, userPos.lng),
+        destinoActual.marker.getPosition()
+      ) / 1000;
+
+      if (distancia < RADIO_LLEGADA) {
+        Swal.fire("✅ Entrega completada", `Has llegado a ${destinoActual.nombre}`, "success");
+        destinoActual.marker.setMap(null);
+        markers.shift();
+        actualizarLista();
+        recalcularRuta();
+      }
+    }
+  </script>
+
+  <script async src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBd90hP55C8sWP9DplgZ3shkRa0dKz8K6A&libraries=geometry&callback=initMap"></script>
+</body>
+</html>
